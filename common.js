@@ -170,7 +170,7 @@ async function downloadTicket(record, qrEl) {
   const grd = g.createLinearGradient(0, H - 64, 0, H); grd.addColorStop(0, '#f8961e'); grd.addColorStop(1, '#f05a28');
   g.fillStyle = grd; g.fillRect(0, H - 64, W, 64);
   g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = `600 18px ${head}`;
-  g.fillText('Tunjukkan QR code & KTM di meja registrasi', W / 2, H - 25);
+  g.fillText('Tunjukkan QR code ini di meja registrasi', W / 2, H - 25);
   const a = document.createElement('a');
   a.download = `ticket-${record.id}.png`;
   a.href = c.toDataURL('image/png');
