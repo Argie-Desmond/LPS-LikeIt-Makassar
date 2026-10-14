@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event – Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="staff">
+<div class="wrap wide">
+  <header class="top">
+    <div class="ident">
+      <img src="assets/logo.png" alt="LikeIT">
+      <div>
+      <h1>Registration Dashboard</h1>
+      <div class="sub">Updated <span id="updated">loading…</span></div>
+      </div>
+    </div>
+    <nav class="links">
+      <a href="scanner.html">Open scanner</a>
+      <a href="index.html" target="_blank">Registration page</a>
+      <a href="#" onclick="logoutAdmin();return false">Lock</a>
+    </nav>
+  </header>
+
+  <section class="stats">
+    <div class="stat"><div class="n" id="sTotal">–</div><div class="l">Total registered</div></div>
+    <div class="stat"><div class="n" id="sYes">–</div><div class="l">Confirmed attending</div></div>
+    <div class="stat"><div class="n" id="sArr">–</div><div class="l">Arrived <span id="sPct"></span></div>
+      <div class="bar"><i id="sBar"></i></div></div>
+    <div class="stat"><div class="n" id="sIn" style="color:var(--ok)">–</div><div class="l">Currently inside</div></div>
+    <div class="stat"><div class="n" id="sOut" style="color:var(--bad)">–</div><div class="l">Checked out</div></div>
+  </section>
+
+  <div class="toolbar">
+    <input id="q" placeholder="Search name, NIM, major, phone or ticket ID">
+    <select id="fStatus">
+      <option value="all">All</option>
+      <option value="in">Currently inside</option>
+      <option value="out">Checked out</option>
+      <option value="none">Not arrived</option>
+      <option value="yes">Attending: Yes</option>
+      <option value="no">Attending: No</option>
+    </select>
+    <select id="fMajor"><option value="">All majors</option></select>
+    <button class="btn" id="refreshBtn">Refresh</button>
+    <button class="btn" id="csvBtn">Export CSV</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Ticket ID</th><th>Name</th><th>NIM</th><th>Major</th><th>Phone</th>
+        <th>Attending</th><th>Status</th><th>Check-in</th><th>Check-out</th><th></th>
+      </tr></thead>
+      <tbody id="tbody"><tr><td colspan="11" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <p class="error" id="err"></p>
+</div>
+
+<!-- QR modal -->
+<div class="modal hidden" id="modal">
+  <div class="card ticket">
+    <div class="tid" id="mId"></div>
+    <div class="qr" id="mQr"></div>
+    <dl class="kv" id="mDetails"></dl>
+    <div class="actions">
+      <button class="btn primary" id="mDl">Download ticket</button>
+      <button class="btn" id="mClose">Close</button>
+    </div>
+    <div class="vbtns">
+      <button class="btn vin" id="mIn">Check in</button>
+      <button class="btn vout" id="mOut">Check out</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/vendor/qrcode.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const STATE = { in: ['Inside', 'ok'], out: ['Checked out', 'out'], none: ['Not arrived', 'no'] };
+let KEY = null, rows = [], timer = null, modalRec = null;
+
+requireAdmin(k => { KEY = k; refresh(); timer = setInterval(refresh, 15000); });
+
+async function refresh() {
+  if (!KEY) return;
+  try {
+    const res = await api({ action: 'list', key: KEY });
+    rows = res.rows.sort((a, b) => a.registeredAt.localeCompare(b.registeredAt));
+    $('err').textContent = '';
+    $('updated').textContent = new Date().toLocaleTimeString();
+    fillMajors(); render();
+  } catch (e) { $('err').textContent = e.message; }
+}
+
+function fillMajors() {
+  const sel = $('fMajor'), cur = sel.value;
+  const majors = [...new Set(rows.map(r => r.major.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  sel.innerHTML = '<option value="">All majors</option>' + majors.map(m => `<option>${esc(m)}</option>`).join('');
+  sel.value = majors.includes(cur) ? cur : '';
+}
+
+function filtered() {
+  const q = $('q').value.trim().toLowerCase(), st = $('fStatus').value, mj = $('fMajor').value;
+  return rows.filter(r => {
+    if (['in', 'out', 'none'].includes(st) && r.state !== st) return false;
+    if (st === 'yes' && r.attendance !== 'Yes') return false;
+    if (st === 'no' && r.attendance === 'Yes') return false;
+    if (mj && r.major.trim() !== mj) return false;
+    if (q && ![r.id, r.name, r.nim, r.major, r.phone].join(' ').toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
+function render() {
+  const total = rows.length, yes = rows.filter(r => r.attendance === 'Yes').length;
+  const inn = rows.filter(r => r.state === 'in').length, out = rows.filter(r => r.state === 'out').length;
+  const arr = inn + out;
+  $('sTotal').textContent = total; $('sYes').textContent = yes; $('sArr').textContent = arr;
+  $('sIn').textContent = inn; $('sOut').textContent = out;
+  const pct = yes ? Math.round(arr / yes * 100) : 0;
+  $('sPct').textContent = yes ? `(${pct}% of confirmed)` : '';
+  $('sBar').style.width = Math.min(pct, 100) + '%';
+
+  const list = filtered();
+  $('tbody').innerHTML = list.length ? list.map((r, i) => `
+    <tr>
+      <td class="muted">${i + 1}</td>
+      <td class="mono">${esc(r.id)}</td>
+      <td>${esc(r.name)}</td>
+      <td class="mono">${esc(r.nim)}</td>
+      <td>${esc(r.major)}</td>
+      <td class="mono">${esc(r.phone)}</td>
+      <td><span class="pill ${r.attendance === 'Yes' ? 'ok' : 'no'}">${esc(r.attendance)}</span></td>
+      <td><span class="pill ${STATE[r.state][1]}">${STATE[r.state][0]}</span></td>
+      <td class="muted">${esc(fmtTime(r.checkInTime))}</td>
+      <td class="muted">${esc(fmtTime(r.checkOutTime))}</td>
+      <td><button class="btn small" data-id="${esc(r.id)}">View</button></td>
+    </tr>`).join('') : '<tr><td colspan="11" class="muted">No registrations match.</td></tr>';
+}
+
+$('tbody').addEventListener('click', e => {
+  const id = e.target.dataset && e.target.dataset.id;
+  if (id) openModal(rows.find(r => r.id === id));
+});
+
+function openModal(r) {
+  modalRec = r;
+  $('mId').textContent = r.id;
+  makeQR($('mQr'), r, 220);
+  $('mDetails').innerHTML = [['Name', r.name], ['NIM', r.nim], ['Major', r.major], ['Phone', r.phone],
+    ['Attending', r.attendance], ['Status', STATE[r.state][0]],
+    ['Check-in', fmtTime(r.checkInTime) || '–'], ['Check-out', fmtTime(r.checkOutTime) || '–']]
+    .map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
+  $('mIn').disabled = r.state === 'in';
+  $('mOut').disabled = r.state !== 'in';
+  $('modal').classList.remove('hidden');
+}
+$('mClose').onclick = () => $('modal').classList.add('hidden');
+$('modal').onclick = e => { if (e.target.id === 'modal') $('modal').classList.add('hidden'); };
+$('mDl').onclick = () => modalRec && downloadTicket(modalRec, $('mQr'));
+async function manualMove(dir) {
+  if (!modalRec) return;
+  $('mIn').disabled = $('mOut').disabled = true;
+  try {
+    const res = await api({ action: dir === 'in' ? 'checkin' : 'checkout', id: modalRec.id, key: KEY });
+    if (res.conflict) alert('Status was already changed on another device. Refreshing.');
+    $('modal').classList.add('hidden');
+    await refresh();
+  } catch (e) { alert(e.message); openModal(modalRec); }
+}
+$('mIn').onclick = () => manualMove('in');
+$('mOut').onclick = () => manualMove('out');
+
+['q', 'fStatus', 'fMajor'].forEach(id => $(id).addEventListener('input', render));
+$('refreshBtn').onclick = refresh;
+
+$('csvBtn').onclick = () => {
+  const head = ['Ticket ID', 'Name', 'NIM', 'Major', 'Phone', 'Attending', 'Status', 'Check-in Time', 'Check-out Time', 'Registered At'];
+  const cell = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const lines = [head.map(cell).join(',')].concat(filtered().map(r =>
+    [r.id, r.name, "'" + r.nim, r.major, "'" + r.phone, r.attendance, STATE[r.state][0],
+     fmtTime(r.checkInTime), fmtTime(r.checkOutTime), fmtTime(r.registeredAt)].map(cell).join(',')));
+  const blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `registrations-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+};
+</script>
+</body>
+</html>

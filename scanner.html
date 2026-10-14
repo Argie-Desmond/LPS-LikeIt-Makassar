@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event – Check-in Scanner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="staff">
+<div class="wrap">
+  <header class="top">
+    <div class="ident">
+      <img src="assets/logo.png" alt="LikeIT">
+      <div>
+      <h1>Check-in Scanner</h1>
+      <div class="sub">On-site check-in / check-out</div>
+      </div>
+    </div>
+    <nav class="links">
+      <a href="dashboard.html">Dashboard</a>
+      <a href="#" onclick="logoutAdmin();return false">Lock</a>
+    </nav>
+  </header>
+
+  <div class="card">
+    <div id="readerWrap">
+      <div id="reader"></div>
+      <div class="paused-note">Camera paused — close the popup to scan the next person</div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="startBtn">Start camera</button>
+      <button class="btn hidden" id="stopBtn">Stop camera</button>
+      <select id="camSel" class="hidden" style="width:auto"></select>
+    </div>
+
+    <label for="manualId">Or enter ticket ID manually</label>
+    <form class="row" id="manualForm">
+      <input id="manualId" placeholder="REG-XXXXXXXX" autocapitalize="characters">
+      <button class="btn" type="submit">Open</button>
+    </form>
+
+    <div id="result" class="result hidden"></div>
+  </div>
+
+  <p class="muted" style="font-size:.85rem;text-align:center;margin-top:14px">
+    This session: <b id="cntIn">0</b> checked in · <b id="cntOut">0</b> checked out
+  </p>
+</div>
+
+<!-- Verification popup -->
+<div class="vmodal hidden" id="vm">
+  <div class="vcard" id="vcard" role="dialog" aria-modal="true" aria-labelledby="vName">
+    <div class="vhead">
+      <span class="vlabel" id="vLabel">CHECKING…</span>
+      <button class="vclose" id="vClose" aria-label="Cancel">×</button>
+    </div>
+    <div class="vname" id="vName"></div>
+    <dl class="kv" id="vDetails"></dl>
+    <div class="vstate" id="vState"></div>
+    <div class="vbtns">
+      <button class="btn vin" id="vIn" disabled>Check in</button>
+      <button class="btn vout" id="vOut" disabled>Check out</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/vendor/html5-qrcode.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let KEY = null, scanner = null, popupOpen = false, current = null;
+let lastText = '', lastAt = 0, cntIn = 0, cntOut = 0;
+
+requireAdmin(k => { KEY = k; });
+
+/* ---------- camera ---------- */
+async function startCamera() {
+  try {
+    const cams = await Html5Qrcode.getCameras();
+    if (!cams.length) throw new Error('No camera found.');
+    const sel = $('camSel');
+    if (!sel.options.length) {
+      sel.innerHTML = cams.map(c => `<option value="${esc(c.id)}">${esc(c.label || 'Camera')}</option>`).join('');
+      const back = cams.find(c => /back|rear|environment/i.test(c.label));
+      sel.value = back ? back.id : cams[cams.length - 1].id;
+    }
+    sel.classList.toggle('hidden', cams.length < 2);
+    scanner = scanner || new Html5Qrcode('reader');
+    await scanner.start(sel.value, { fps: 10, qrbox: { width: 250, height: 250 } }, onScan, () => {});
+    $('startBtn').classList.add('hidden');
+    $('stopBtn').classList.remove('hidden');
+  } catch (err) {
+    showResult('bad', 'Camera error', esc(err.message || err) +
+      '<br><small>The camera only works over HTTPS (or localhost) and needs permission.</small>');
+  }
+}
+async function stopCamera() {
+  camWasOn = false;   // a manual stop means: don't auto-restart when the popup closes
+  $('reader').classList.remove('paused');
+  try { if (scanner && scanner.isScanning) await scanner.stop(); } catch (e) {}
+  $('startBtn').classList.remove('hidden');
+  $('stopBtn').classList.add('hidden');
+}
+// Fully stop the camera while a popup is open; restart it when the popup closes.
+let camWasOn = false, scanLock = false, unlockAt = 0;
+async function pauseCam() {
+  camWasOn = !!(scanner && scanner.isScanning);
+  if (camWasOn) {
+    try { await scanner.stop(); } catch (e) {}
+    $('reader').classList.add('paused');
+  }
+}
+async function resumeCam() {
+  if (!camWasOn) { scanLock = false; return; }
+  camWasOn = false;
+  await startCamera();
+  $('reader').classList.remove('paused');
+  unlockAt = Date.now() + 1500;   // short grace period after the camera comes back
+  scanLock = false;
+}
+
+$('startBtn').onclick = startCamera;
+$('stopBtn').onclick = stopCamera;
+$('camSel').onchange = async () => { if (scanner && scanner.isScanning) { await scanner.stop(); startCamera(); } };
+
+/* ---------- scanning ---------- */
+function onScan(text) {
+  const now = Date.now();
+  // scanLock is set synchronously, so extra frames decoded before the camera stops are ignored.
+  if (scanLock || popupOpen || now < unlockAt) return;
+  if (text === lastText && now - lastAt < 5000) return;   // same QR still in view after closing
+  scanLock = true;
+  lastText = text; lastAt = now;
+  openTicket(text);
+}
+
+function parseQR(text) {
+  try {
+    const o = JSON.parse(text);
+    if (o && o.id) return o;
+  } catch (e) {}
+  const m = String(text).trim().toUpperCase().match(/REG-[0-9A-F]{8}/);
+  return m ? { id: m[0] } : null;
+}
+
+async function openTicket(text) {
+  if (!KEY) { scanLock = false; return; }
+  const qr = parseQR(text);
+  if (!qr) {
+    beep(false);
+    showResult('bad', 'Not a valid ticket', 'This QR code was not issued by this system.');
+    scanLock = false;
+    return;
+  }
+  beep('scan');
+  // Show the QR's own data immediately, then load the live status from the sheet.
+  popupOpen = true; scanLock = true; pauseCam();
+  current = null;
+  renderPopup({ id: qr.id, name: qr.name, nim: qr.nim, major: qr.major, phone: qr.phone, attendance: qr.att }, 'loading');
+  $('vm').classList.remove('hidden');
+  try {
+    const res = await apiRetry({ action: 'status', id: qr.id, key: KEY }, { tries: 3 });
+    current = res.record;
+    renderPopup(current);
+  } catch (err) {
+    beep(false);
+    renderPopup({ id: qr.id, name: qr.name || 'Unknown ticket', nim: qr.nim, major: qr.major, phone: qr.phone }, 'error', err.message);
+  }
+}
+
+/* ---------- popup ---------- */
+// Next allowed action: first scan -> check in; inside -> check out; checked out -> check in again.
+function nextAction(r) { return r.state === 'in' ? 'out' : 'in'; }
+
+function renderPopup(r, phase, msg) {
+  const card = $('vcard');
+  const mode = phase === 'loading' ? '' : phase === 'error' ? 'err' : nextAction(r);
+  card.className = 'vcard ' + mode;
+
+  $('vLabel').textContent = phase === 'loading' ? 'CHECKING…'
+                          : phase === 'error'   ? 'NOT FOUND'
+                          : mode === 'in'       ? 'CHECK IN' : 'CHECK OUT';
+  $('vName').textContent = r.name || r.id;
+  $('vDetails').innerHTML = [['Ticket', r.id], ['NIM', r.nim], ['Major', r.major], ['Phone', r.phone], ['Attending', r.attendance]]
+    .filter(([, v]) => v).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
+
+  let state = '';
+  if (phase === 'error') state = '⚠️ ' + esc(msg);
+  else if (phase !== 'loading') {
+    if (r.state === 'none') state = 'First scan — not checked in yet.';
+    else if (r.state === 'in') state = `Inside since <b>${esc(fmtTime(r.checkInTime))}</b>.`;
+    else state = `Checked out at <b>${esc(fmtTime(r.checkOutTime))}</b> — coming back in.`;
+    if (r.attendance && r.attendance !== 'Yes') state += '<br><span class="pill bad">Registered as not attending</span>';
+  }
+  $('vState').innerHTML = msg && phase !== 'error' ? `${state}<br><b>${esc(msg)}</b>` : state;
+
+  $('vIn').disabled  = mode !== 'in';
+  $('vOut').disabled = mode !== 'out';
+  $('vIn').textContent = 'Check in';
+  $('vOut').textContent = 'Check out';
+}
+
+function closePopup() {
+  $('vm').classList.add('hidden');
+  popupOpen = false; current = null;
+  lastAt = Date.now();          // same QR still in front of the camera won't reopen for 5s
+  resumeCam();
+}
+
+async function doAction(dir) {
+  if (!current) return;
+  const btn = dir === 'in' ? $('vIn') : $('vOut');
+  $('vIn').disabled = $('vOut').disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const res = await apiRetry({ action: dir === 'in' ? 'checkin' : 'checkout', id: current.id, key: KEY },
+      { tries: 4, busyOnly: true, onRetry: () => { btn.textContent = 'Server busy, retrying…'; } });
+    const r = res.record;
+    if (res.conflict) {
+      // Someone else changed it on another device – show the latest state instead.
+      beep(false);
+      current = r;
+      renderPopup(r, null, 'Status was just changed on another device. Please confirm again.');
+      return;
+    }
+    beep(true);
+    if (dir === 'in') { cntIn++; $('cntIn').textContent = cntIn; showResult('ok', '✓ Checked in: ' + esc(r.name), `<span class="muted">${esc(r.id)} · ${esc(fmtTime(r.checkInTime))}</span>`); }
+    else { cntOut++; $('cntOut').textContent = cntOut; showResult('out', '⇥ Checked out: ' + esc(r.name), `<span class="muted">${esc(r.id)} · ${esc(fmtTime(r.checkOutTime))}</span>`); }
+    closePopup();
+  } catch (err) {
+    beep(false);
+    renderPopup(current, null, 'Failed: ' + err.message);
+  }
+}
+
+$('vIn').onclick  = () => doAction('in');
+$('vOut').onclick = () => doAction('out');
+$('vClose').onclick = closePopup;
+$('vm').onclick = e => { if (e.target.id === 'vm') closePopup(); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && popupOpen) closePopup(); });
+
+$('manualForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = $('manualId').value.trim().toUpperCase();
+  if (v && !popupOpen) { openTicket(v.startsWith('REG-') ? v : 'REG-' + v); $('manualId').value = ''; }
+});
+
+/* ---------- UI ---------- */
+function showResult(type, title, body) {
+  const el = $('result');
+  el.className = 'result ' + type;
+  el.innerHTML = `<h3>${title}</h3>${body}`;
+}
+
+let actx;
+function beep(kind) {
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.frequency.value = kind === 'scan' ? 660 : kind ? 880 : 220; g.gain.value = 0.15;
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + (kind === 'scan' ? 0.08 : kind ? 0.15 : 0.35));
+    if (navigator.vibrate) navigator.vibrate(kind === false ? [80, 60, 80] : 60);
+  } catch (e) {}
+}
+</script>
+</body>
+</html>
